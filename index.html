@@ -4,20 +4,21 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>WebGC — Run Gekko core</title>
-  <style>body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#111;color:#ddd}#ui{position:fixed;left:8px;top:8px;z-index:10;background:rgba(0,0,0,0.6);padding:10px;border-radius:6px}canvas{display:block;width:100vw;height:100vh;background:#000}</style>
+  <style>body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#111;color:#ddd}#ui{position:fixed;left:8px;top:8px;z-index:10;background:rgba(0,0,0,0.6);padding:10px;border-radius:6px}canvas{display:block;width:100vw;height:100vh;background:#000}#log{max-width:480px;white-space:pre-wrap}</style>
 </head>
 <body>
   <div id="ui">
     <label>Game ISO (.iso/.gcm): <input id="iso" type="file" accept=".iso,.gcm" /></label>
     <label>Optional DSP irom (.bin): <input id="dsp" type="file" accept=".bin" /></label>
     <div style="margin-top:6px"><button id="run">Run</button> <button id="reload">Reload WASM</button></div>
-    <div id="log" style="margin-top:8px;font-size:12px;color:#9f9;max-width:380px;white-space:pre-wrap"></div>
+    <div id="log" style="margin-top:8px;font-size:12px;color:#9f9;"></div>
   </div>
   <canvas id="screen"></canvas>
 
   <script type="module">
     const logEl = document.getElementById('log');
     function log(...args){ logEl.textContent += args.join(' ') + '\n'; }
+    function clearLog(){ logEl.textContent = ''; }
 
     // Import the wasm-bindgen generated module (web.js) in the repo root
     // Usage: the generated JS exports a default init function and named exports (e.g. start_emulator)
@@ -50,7 +51,23 @@
       await loadWasm();
     });
 
+    // simple byte-search for ASCII string (case-sensitive)
+    function containsAsciiString(buffer, str, maxSearchBytes = 4 * 1024 * 1024) {
+      const encoder = new TextEncoder();
+      const pat = encoder.encode(str);
+      const view = new Uint8Array(buffer);
+      const searchLen = Math.min(view.length, maxSearchBytes);
+      outer: for (let i = 0; i + pat.length <= searchLen; i++) {
+        for (let j = 0; j < pat.length; j++) {
+          if (view[i + j] !== pat[j]) continue outer;
+        }
+        return true;
+      }
+      return false;
+    }
+
     document.getElementById('run').addEventListener('click', async ()=>{
+      clearLog();
       if (!wasmReady) { log('WASM not ready'); return; }
       const isoInput = document.getElementById('iso');
       const dspInput = document.getElementById('dsp');
@@ -60,6 +77,16 @@
       const buf = await f.arrayBuffer();
       let dspBuf = null;
       if (dspInput.files[0]) { dspBuf = new Uint8Array(await dspInput.files[0].arrayBuffer()); log('Loaded DSP irom', dspInput.files[0].name); }
+
+      // Quick heuristic: scan the first few MB for "main.dol"
+      const looksLikeGcIso = containsAsciiString(buf, 'main.dol', 8 * 1024 * 1024);
+      if (!looksLikeGcIso) {
+        log('Warning: main.dol not found in the first 8 MB of this file. The file may not be a valid GameCube disc image.');
+        log('If this is a standalone .dol, the current build expects a full ISO.');
+        // Offer to continue (dangerous) or abort
+        const proceed = confirm('main.dol not found — abort loading? Press Cancel to abort, OK to try loading anyway (may crash).');
+        if (!proceed) return;
+      }
 
       // start_emulator expects (rom_data Uint8Array, filename string, dsp_irom Uint8Array|null)
       try {
@@ -71,7 +98,16 @@
         wasmInit.start_emulator(new Uint8Array(buf), f.name, dspBuf);
         log('Called start_emulator — emulator should start and render to canvas if the core manages its own output.');
       } catch (e) {
-        log('Error calling start_emulator:', e);
+        // show helpful message when the core panics looking for main.dol
+        if (e && e.message && e.message.includes('Invalid GameCube disc image')) {
+          log('Emulator error: the core failed to extract main.dol from the ISO.');
+          log('This usually means the file is not a full GameCube disc image (main.dol missing or corrupted).');
+          log('Options:');
+          log(' - Provide a proper GameCube ISO (full disc image, typically ~1.4 GB).');
+          log(' - If you only have a .dol (the executable), rebuild the core with a shim to accept raw DOLs, or I can add a helper to wrap a DOL into a minimal ISO for testing.');
+        } else {
+          log('Error calling start_emulator:', e);
+        }
         console.error(e);
       }
     });
