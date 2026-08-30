@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WebGC — Run Gekko core</title>
+  <style>body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#111;color:#ddd}#ui{position:fixed;left:8px;top:8px;z-index:10;background:rgba(0,0,0,0.6);padding:10px;border-radius:6px}canvas{display:block;width:100vw;height:100vh;background:#000}</style>
+</head>
+<body>
+  <div id="ui">
+    <label>Game ISO (.iso/.gcm): <input id="iso" type="file" accept=".iso,.gcm" /></label>
+    <label>Optional DSP irom (.bin): <input id="dsp" type="file" accept=".bin" /></label>
+    <div style="margin-top:6px"><button id="run">Run</button> <button id="reload">Reload WASM</button></div>
+    <div id="log" style="margin-top:8px;font-size:12px;color:#9f9;max-width:380px;white-space:pre-wrap"></div>
+  </div>
+  <canvas id="screen"></canvas>
+
+  <script type="module">
+    const logEl = document.getElementById('log');
+    function log(...args){ logEl.textContent += args.join(' ') + '\n'; }
+
+    // Import the wasm-bindgen generated module (web.js) in the repo root
+    // Usage: the generated JS exports a default init function and named exports (e.g. start_emulator)
+    let wasmInit = null;
+    let wasmReady = false;
+
+    async function loadWasm(){
+      log('Loading wasm module web.js...');
+      try {
+        const mod = await import('./web.js');
+        // default export is the initializer (__wbg_init)
+        if (typeof mod.default === 'function') {
+          await mod.default();
+        } else if (typeof mod.__wbg_init === 'function') {
+          await mod.__wbg_init();
+        }
+        wasmInit = mod;
+        wasmReady = true;
+        log('WASM module initialized. Available exports: ' + Object.keys(mod).join(', '));
+      } catch (e) {
+        log('Error loading wasm module:', e);
+        console.error(e);
+      }
+    }
+
+    await loadWasm();
+
+    document.getElementById('reload').addEventListener('click', async ()=>{
+      wasmReady = false; log('Reloading wasm...');
+      await loadWasm();
+    });
+
+    document.getElementById('run').addEventListener('click', async ()=>{
+      if (!wasmReady) { log('WASM not ready'); return; }
+      const isoInput = document.getElementById('iso');
+      const dspInput = document.getElementById('dsp');
+      const f = isoInput.files[0];
+      if (!f) { log('Pick an ISO first'); return; }
+      log('Reading ISO file', f.name, f.size, 'bytes');
+      const buf = await f.arrayBuffer();
+      let dspBuf = null;
+      if (dspInput.files[0]) { dspBuf = new Uint8Array(await dspInput.files[0].arrayBuffer()); log('Loaded DSP irom', dspInput.files[0].name); }
+
+      // start_emulator expects (rom_data Uint8Array, filename string, dsp_irom Uint8Array|null)
+      try {
+        if (typeof wasmInit.start_emulator !== 'function') {
+          log('start_emulator export not found on wasm module. Exports: ' + Object.keys(wasmInit).join(', '));
+          return;
+        }
+        // Call start_emulator with Uint8Array and filename
+        wasmInit.start_emulator(new Uint8Array(buf), f.name, dspBuf);
+        log('Called start_emulator — emulator should start and render to canvas if the core manages its own output.');
+      } catch (e) {
+        log('Error calling start_emulator:', e);
+        console.error(e);
+      }
+    });
+
+    // Basic canvas sizing; the wasm module may create its own canvas or render into one — if not, you can expose a canvas to it.
+    function resize(){
+      const c = document.getElementById('screen');
+      c.width = window.innerWidth;
+      c.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    log('UI ready. Click Run after selecting an ISO.');
+  </script>
+</body>
+</html>
